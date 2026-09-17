@@ -1,0 +1,214 @@
+using System.Data;
+using System.Text;
+using System.Text.RegularExpressions;
+using Microsoft.Data.SqlClient;
+using SqlAutoRollback.Models;
+
+namespace SqlAutoRollback.Services;
+
+public sealed class SqlExecutionService : ISqlExecutionService
+{
+    private static readonly Regex GoSplitter = new(
+        @"^\s*GO\s*(?:--.*)?$",
+        RegexOptions.Multiline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    public async Task<ServerInfo> TestConnectionAsync(string connectionString, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT CAST(SERVERPROPERTY('ProductMajorVersion') AS nvarchar(16));";
+        var version = await command.ExecuteScalarAsync(cancellationToken) as string;
+
+        return new ServerInfo { ProductMajorVersion = version };
+    }
+
+    public async Task<QueryExecutionResult> ExecuteAsync(
+        string connectionString,
+        string script,
+        CancellationToken cancellationToken = default)
+    {
+        var batches = SplitBatches(script);
+        if (batches.Count == 0)
+        {
+            return new QueryExecutionResult
+            {
+                Success = true,
+                Message = "Nothing to execute.",
+                RowsAffected = 0
+            };
+        }
+
+        var tables = new List<DataTable>();
+        var messages = new List<string>();
+        var totalAffected = 0;
+        var hadAffected = false;
+
+        await using var connection = new SqlConnection(connectionString);
+        connection.InfoMessage += (_, args) =>
+        {
+            if (!string.IsNullOrWhiteSpace(args.Message))
+            {
+                messages.Add(args.Message);
+            }
+        };
+
+        await connection.OpenAsync(cancellationToken);
+
+        try
+        {
+            foreach (var batch in batches)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                await using var command = connection.CreateCommand();
+                command.CommandText = batch;
+                command.CommandTimeout = 60;
+
+                await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+                do
+                {
+                    if (reader.FieldCount > 0)
+                    {
+                        var table = LoadTable(reader);
+                        table.TableName = $"Result {tables.Count + 1}";
+                        tables.Add(table);
+                        messages.Add($"({table.Rows.Count} row{(table.Rows.Count == 1 ? "" : "s")} returned)");
+                    }
+                }
+                while (await reader.NextResultAsync(cancellationToken));
+
+                if (reader.RecordsAffected >= 0)
+                {
+                    totalAffected += reader.RecordsAffected;
+                    hadAffected = true;
+                    messages.Add($"{reader.RecordsAffected} row(s) affected.");
+                }
+            }
+
+            if (messages.Count == 0)
+            {
+                messages.Add("Command(s) completed successfully.");
+            }
+
+            return new QueryExecutionResult
+            {
+                Success = true,
+                Message = string.Join(Environment.NewLine, messages),
+                Tables = tables,
+                RowsAffected = hadAffected ? totalAffected : -1
+            };
+        }
+        catch (SqlException ex)
+        {
+            messages.Add(FormatSqlError(ex));
+            return new QueryExecutionResult
+            {
+                Success = false,
+                Message = string.Join(Environment.NewLine, messages),
+                Tables = tables,
+                RowsAffected = hadAffected ? totalAffected : -1
+            };
+        }
+        catch (Exception ex)
+        {
+            messages.Add(ex.Message);
+            return new QueryExecutionResult
+            {
+                Success = false,
+                Message = string.Join(Environment.NewLine, messages),
+                Tables = tables,
+                RowsAffected = hadAffected ? totalAffected : -1
+            };
+        }
+    }
+
+    private static List<string> SplitBatches(string script)
+    {
+        return GoSplitter
+            .Split(script)
+            .Select(batch => batch.Trim())
+            .Where(batch => batch.Length > 0)
+            .ToList();
+    }
+
+    private static DataTable LoadTable(SqlDataReader reader)
+    {
+        var table = new DataTable();
+        var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        for (var i = 0; i < reader.FieldCount; i++)
+        {
+            var name = reader.GetName(i);
+            if (string.IsNullOrWhiteSpace(name))
+            {
+                name = $"Column{i + 1}";
+            }
+
+            var unique = name;
+            var suffix = 1;
+            while (!usedNames.Add(unique))
+            {
+                unique = $"{name}{suffix++}";
+            }
+
+            var type = reader.GetFieldType(i) ?? typeof(object);
+            if (type == typeof(byte[]))
+            {
+                type = typeof(string);
+            }
+
+            table.Columns.Add(unique, Nullable.GetUnderlyingType(type) ?? type);
+        }
+
+        while (reader.Read())
+        {
+            var values = new object[reader.FieldCount];
+            for (var i = 0; i < reader.FieldCount; i++)
+            {
+                if (reader.IsDBNull(i))
+                {
+                    values[i] = DBNull.Value;
+                    continue;
+                }
+
+                var value = reader.GetValue(i);
+                values[i] = value is byte[] bytes ? Convert.ToHexString(bytes) : value;
+            }
+
+            table.Rows.Add(values);
+        }
+
+        return table;
+    }
+
+    private static string FormatSqlError(SqlException exception)
+    {
+        var builder = new StringBuilder();
+        foreach (SqlError error in exception.Errors)
+        {
+            builder.Append("Msg ");
+            builder.Append(error.Number);
+            builder.Append(", Level ");
+            builder.Append(error.Class);
+            builder.Append(", State ");
+            builder.Append(error.State);
+            if (!string.IsNullOrWhiteSpace(error.Procedure))
+            {
+                builder.Append(", Procedure ");
+                builder.Append(error.Procedure);
+            }
+
+            if (error.LineNumber > 0)
+            {
+                builder.Append(", Line ");
+                builder.Append(error.LineNumber);
+            }
+
+            builder.AppendLine();
+            builder.AppendLine(error.Message);
+        }
+
+        return builder.Length == 0 ? exception.Message : builder.ToString().TrimEnd();
+    }
+}

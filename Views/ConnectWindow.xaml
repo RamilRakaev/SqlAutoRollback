@@ -1,0 +1,74 @@
+<Window x:Class="SqlAutoRollback.Views.ConnectWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:helpers="clr-namespace:SqlAutoRollback.Helpers"
+        Title="Connect"
+        Height="430"
+        Width="520"
+        MinHeight="360"
+        MinWidth="420"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Background="#E8E8E8"
+        FontFamily="Segoe UI"
+        FontSize="12">
+    <Grid Margin="20,16,20,16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0" Margin="0,0,0,12"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}">
+            <TextBlock Text="Server Name" Margin="0,0,0,4"/>
+            <TextBox Text="{Binding ServerName, UpdateSourceTrigger=PropertyChanged}"
+                     Height="24"
+                     Padding="4,2"
+                     VerticalContentAlignment="Center"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="1" Margin="0,0,0,12"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}">
+            <TextBlock Text="User Name" Margin="0,0,0,4"/>
+            <TextBox Text="{Binding UserName, UpdateSourceTrigger=PropertyChanged}"
+                     Height="24"
+                     Padding="4,2"
+                     VerticalContentAlignment="Center"/>
+        </StackPanel>
+
+        <StackPanel Grid.Row="2" Margin="0,0,0,12"
+                    IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}">
+            <TextBlock Text="Password" Margin="0,0,0,4"/>
+            <PasswordBox helpers:PasswordBoxHelper.BindPassword="True"
+                         helpers:PasswordBoxHelper.BoundPassword="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         Height="24"
+                         Padding="4,2"
+                         VerticalContentAlignment="Center"/>
+        </StackPanel>
+
+        <TextBlock Grid.Row="4"
+                   Text="{Binding ErrorMessage}"
+                   Foreground="#C42B1C"
+                   TextWrapping="Wrap"
+                   Margin="0,8,0,12"
+                   Visibility="{Binding ErrorMessage, Converter={StaticResource NullToVisibility}}"/>
+
+        <Grid Grid.Row="5">
+            <Button Content="Connect"
+                    HorizontalAlignment="Left"
+                    Style="{StaticResource DialogButtonStyle}"
+                    Command="{Binding ConnectCommand}"
+                    IsDefault="True"/>
+            <Button Content="Cancel"
+                    HorizontalAlignment="Right"
+                    Style="{StaticResource DialogButtonStyle}"
+                    Command="{Binding CancelCommand}"
+                    IsCancel="True"/>
+        </Grid>
+    </Grid>
+</Window>

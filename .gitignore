@@ -1,0 +1,25 @@
+## Visual Studio / .NET
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.rsuser
+[Dd]ebug/
+[Rr]elease/
+*.cache
+*.nupkg
+project.lock.json
+artifacts/
+
+## Rider / VS Code / Cursor
+.idea/
+.vscode/
+*.code-workspace
+
+## OS
+Thumbs.db
+Desktop.ini
+.DS_Store
