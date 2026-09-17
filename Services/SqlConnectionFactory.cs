@@ -10,13 +10,22 @@ public static class SqlConnectionFactory
         var builder = new SqlConnectionStringBuilder
         {
             DataSource = credentials.ServerName,
-            UserID = credentials.UserName,
-            Password = credentials.Password,
             Encrypt = true,
             TrustServerCertificate = true,
             ApplicationName = "SqlAutoRollback",
             ConnectTimeout = 15
         };
+
+        if (credentials.UseWindowsAuthentication)
+        {
+            builder.IntegratedSecurity = true;
+        }
+        else
+        {
+            builder.IntegratedSecurity = false;
+            builder.UserID = credentials.UserName;
+            builder.Password = credentials.Password;
+        }
 
         return builder.ConnectionString;
     }
