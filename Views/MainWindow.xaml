@@ -362,6 +362,12 @@
                                                                 ToolTip="Open a new query with a rollback script"
                                                                 Command="{Binding DataContext.OpenRollbackCommand, RelativeSource={RelativeSource AncestorType=Window}}"
                                                                 CommandParameter="{Binding}"/>
+                                                        <TextBlock DockPanel.Dock="Right"
+                                                                   Text="{Binding DatabaseDisplay}"
+                                                                   Foreground="#666"
+                                                                   Margin="8,0,0,0"
+                                                                   VerticalAlignment="Center"
+                                                                   Visibility="{Binding DatabaseDisplay, Converter={StaticResource NullToVisibility}}"/>
                                                         <TextBlock Text="{Binding ExecutedAtDisplay}"
                                                                    FontWeight="SemiBold"
                                                                    Foreground="#333"

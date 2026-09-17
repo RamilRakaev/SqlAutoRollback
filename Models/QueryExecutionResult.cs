@@ -10,4 +10,5 @@ public sealed class QueryExecutionResult
     public int RowsAffected { get; init; }
     public bool IsTrackedChange { get; init; }
     public string? RollbackScript { get; init; }
+    public string DatabaseName { get; init; } = string.Empty;
 }

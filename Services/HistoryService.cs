@@ -15,6 +15,7 @@ public sealed class HistoryService : IHistoryService
         string serverName,
         string script,
         string rollbackScript,
+        string databaseName,
         int rowsAffected,
         CancellationToken cancellationToken = default)
     {
@@ -26,6 +27,7 @@ public sealed class HistoryService : IHistoryService
         AppPaths.EnsureCreated();
         var executedAt = DateTime.Now;
         rollbackScript ??= string.Empty;
+        databaseName ??= string.Empty;
 
         await _gate.WaitAsync(cancellationToken);
         try
@@ -38,12 +40,13 @@ public sealed class HistoryService : IHistoryService
             {
                 command.CommandText =
                     """
-                    INSERT INTO ScriptHistory (ServerName, Script, RollbackScript, ExecutedAt, RowsAffected)
-                    VALUES ($server, $script, $rollback, $executedAt, $rows);
+                    INSERT INTO ScriptHistory (ServerName, Script, RollbackScript, DatabaseName, ExecutedAt, RowsAffected)
+                    VALUES ($server, $script, $rollback, $database, $executedAt, $rows);
                     """;
                 command.Parameters.AddWithValue("$server", serverName);
                 command.Parameters.AddWithValue("$script", script);
                 command.Parameters.AddWithValue("$rollback", rollbackScript);
+                command.Parameters.AddWithValue("$database", databaseName);
                 command.Parameters.AddWithValue("$executedAt", executedAt.ToString("o", CultureInfo.InvariantCulture));
                 command.Parameters.AddWithValue("$rows", rowsAffected);
                 await command.ExecuteNonQueryAsync(cancellationToken);
@@ -54,7 +57,7 @@ public sealed class HistoryService : IHistoryService
             _gate.Release();
         }
 
-        await AppendHistoryFileAsync(serverName, script, rollbackScript, executedAt, cancellationToken);
+        await AppendHistoryFileAsync(serverName, script, rollbackScript, databaseName, executedAt, cancellationToken);
     }
 
     public async Task<IReadOnlyList<ScriptHistoryEntry>> GetAsync(string serverName, CancellationToken cancellationToken = default)
@@ -77,7 +80,7 @@ public sealed class HistoryService : IHistoryService
             await using var command = connection.CreateCommand();
             command.CommandText =
                 """
-                SELECT Id, ServerName, Script, IFNULL(RollbackScript, ''), ExecutedAt, RowsAffected
+                SELECT Id, ServerName, Script, IFNULL(RollbackScript, ''), ExecutedAt, RowsAffected, IFNULL(DatabaseName, '')
                 FROM ScriptHistory
                 WHERE ServerName = $server
                 ORDER BY Id DESC
@@ -102,7 +105,8 @@ public sealed class HistoryService : IHistoryService
                     Script = script,
                     RollbackScript = reader.GetString(3),
                     ExecutedAt = DateTime.Parse(reader.GetString(4), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-                    RowsAffected = reader.GetInt32(5)
+                    RowsAffected = reader.GetInt32(5),
+                    DatabaseName = reader.FieldCount > 6 ? reader.GetString(6) : string.Empty
                 });
             }
 
@@ -133,49 +137,67 @@ public sealed class HistoryService : IHistoryService
                 ServerName TEXT NOT NULL,
                 Script TEXT NOT NULL,
                 RollbackScript TEXT NOT NULL DEFAULT '',
+                DatabaseName TEXT NOT NULL DEFAULT '',
                 ExecutedAt TEXT NOT NULL,
                 RowsAffected INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS IX_ScriptHistory_ServerName ON ScriptHistory(ServerName);
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
+        await EnsureColumnAsync(connection, "RollbackScript", "TEXT NOT NULL DEFAULT ''", cancellationToken);
+        await EnsureColumnAsync(connection, "DatabaseName", "TEXT NOT NULL DEFAULT ''", cancellationToken);
+    }
 
+    private static async Task EnsureColumnAsync(
+        SqliteConnection connection,
+        string columnName,
+        string definition,
+        CancellationToken cancellationToken)
+    {
         await using var info = connection.CreateCommand();
         info.CommandText = "PRAGMA table_info(ScriptHistory);";
-        var hasRollback = false;
+        var exists = false;
         await using (var reader = await info.ExecuteReaderAsync(cancellationToken))
         {
             while (await reader.ReadAsync(cancellationToken))
             {
-                if (string.Equals(reader.GetString(1), "RollbackScript", StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
                 {
-                    hasRollback = true;
+                    exists = true;
                     break;
                 }
             }
         }
 
-        if (!hasRollback)
+        if (exists)
         {
-            await using var alter = connection.CreateCommand();
-            alter.CommandText = "ALTER TABLE ScriptHistory ADD COLUMN RollbackScript TEXT NOT NULL DEFAULT '';";
-            await alter.ExecuteNonQueryAsync(cancellationToken);
+            return;
         }
+
+        await using var alter = connection.CreateCommand();
+        alter.CommandText = $"ALTER TABLE ScriptHistory ADD COLUMN {columnName} {definition};";
+        await alter.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task AppendHistoryFileAsync(
         string serverName,
         string script,
         string rollbackScript,
+        string databaseName,
         DateTime executedAt,
         CancellationToken cancellationToken)
     {
         var path = AppPaths.GetHistoryFilePath(serverName);
         var rollback = string.IsNullOrWhiteSpace(rollbackScript)
-            ? RollbackScriptBuilder.BuildBestEffort(script)
+            ? RollbackScriptBuilder.BuildBestEffort(script, databaseName)
             : rollbackScript.Trim();
+        rollback = RollbackScriptBuilder.PrefixUse(rollback, databaseName);
+        var databaseLine = string.IsNullOrWhiteSpace(databaseName)
+            ? string.Empty
+            : $"-- Database: {databaseName}{Environment.NewLine}";
         var block =
             $"-- {executedAt:dd.MM.yyyy HH:mm:ss}{Environment.NewLine}" +
+            databaseLine +
             $"-- Original:{Environment.NewLine}" +
             $"{script.Trim()}{Environment.NewLine}{Environment.NewLine}" +
             $"-- Rollback:{Environment.NewLine}" +
@@ -243,15 +265,34 @@ public sealed class HistoryService : IHistoryService
             }
 
             var rollback = string.Empty;
+            var databaseName = string.Empty;
+            const string databaseMarker = "-- Database:";
             const string originalMarker = "-- Original:";
             const string rollbackMarker = "-- Rollback:";
+
+            var databaseIndex = script.IndexOf(databaseMarker, StringComparison.OrdinalIgnoreCase);
             var originalIndex = script.IndexOf(originalMarker, StringComparison.OrdinalIgnoreCase);
             var rollbackIndex = script.IndexOf(rollbackMarker, StringComparison.OrdinalIgnoreCase);
+
+            if (databaseIndex >= 0)
+            {
+                var databaseLineEnd = script.IndexOfAny(['\r', '\n'], databaseIndex);
+                var raw = databaseLineEnd >= 0
+                    ? script[(databaseIndex + databaseMarker.Length)..databaseLineEnd]
+                    : script[(databaseIndex + databaseMarker.Length)..];
+                databaseName = raw.Trim();
+            }
+
             if (originalIndex >= 0 && rollbackIndex > originalIndex)
             {
                 var original = script[(originalIndex + originalMarker.Length)..rollbackIndex].Trim();
                 rollback = script[(rollbackIndex + rollbackMarker.Length)..].Trim();
                 script = original;
+            }
+
+            if (string.IsNullOrWhiteSpace(databaseName))
+            {
+                databaseName = string.Join(", ", SqlChangeParser.ExtractUseDatabaseNames(script));
             }
 
             if (string.IsNullOrWhiteSpace(script) || !SqlChangeParser.ContainsTrackedChanges(script))
@@ -261,7 +302,11 @@ public sealed class HistoryService : IHistoryService
 
             if (string.IsNullOrWhiteSpace(rollback))
             {
-                rollback = RollbackScriptBuilder.BuildBestEffort(script);
+                rollback = RollbackScriptBuilder.BuildBestEffort(script, databaseName);
+            }
+            else
+            {
+                rollback = RollbackScriptBuilder.PrefixUse(rollback, databaseName);
             }
 
             entries.Add(new ScriptHistoryEntry
@@ -270,6 +315,7 @@ public sealed class HistoryService : IHistoryService
                 ServerName = serverName,
                 Script = script,
                 RollbackScript = rollback,
+                DatabaseName = databaseName,
                 ExecutedAt = executedAt,
                 RowsAffected = -1
             });

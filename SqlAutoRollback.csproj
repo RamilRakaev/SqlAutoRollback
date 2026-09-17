@@ -1,7 +1,9 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
+	  
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
+	<OutputPath>C:\Projects\SqlAutoRollback\bin\</OutputPath>
+	<TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
@@ -10,6 +12,9 @@
     <AssemblyName>SqlAutoRollback</AssemblyName>
     <Product>SqlAutoRollback</Product>
     <Description>SQL editor with connection management and local execution history for legacy databases.</Description>
+	  <SignAssembly>true</SignAssembly>
+	  <AssemblyOriginatorKeyFile>SqlAutoRollback.snk</AssemblyOriginatorKeyFile>
+	  <DelaySign>false</DelaySign>
   </PropertyGroup>
 
   <ItemGroup>

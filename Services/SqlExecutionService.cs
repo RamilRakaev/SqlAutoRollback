@@ -1,4 +1,5 @@
 using System.Data;
+using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Data.SqlClient;
@@ -48,6 +49,7 @@ public sealed class SqlExecutionService : ISqlExecutionService
         var hadAffected = false;
         var tracked = SqlChangeParser.ContainsTrackedChanges(script);
         var rollbackParts = new List<string>();
+        var databases = new List<string>();
 
         await using var connection = new SqlConnection(connectionString);
         connection.InfoMessage += (_, args) =>
@@ -65,12 +67,23 @@ public sealed class SqlExecutionService : ISqlExecutionService
             foreach (var batch in batches)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                var currentDatabase = await GetDatabaseNameAsync(connection, cancellationToken);
+                var batchDatabase = SqlChangeParser.LastUseDatabaseName(batch) ?? currentDatabase;
+                if (SqlChangeParser.ContainsTrackedChanges(batch))
+                {
+                    RememberDatabase(databases, batchDatabase);
+                }
+
                 RollbackScriptBuilder.RollbackCapture? capture = null;
                 if (tracked)
                 {
                     try
                     {
-                        capture = await _rollback.SnapshotBatchAsync(connection, batch, cancellationToken);
+                        capture = await _rollback.SnapshotBatchAsync(
+                            connection,
+                            batch,
+                            batchDatabase,
+                            cancellationToken);
                     }
                     catch (Exception ex)
                     {
@@ -135,7 +148,8 @@ public sealed class SqlExecutionService : ISqlExecutionService
                 IsTrackedChange = tracked,
                 RollbackScript = rollbackParts.Count == 0
                     ? null
-                    : string.Join(Environment.NewLine + Environment.NewLine, rollbackParts)
+                    : string.Join(Environment.NewLine + Environment.NewLine, rollbackParts),
+                DatabaseName = string.Join(", ", databases)
             };
         }
         catch (SqlException ex)
@@ -147,7 +161,8 @@ public sealed class SqlExecutionService : ISqlExecutionService
                 Message = string.Join(Environment.NewLine, messages),
                 Tables = tables,
                 RowsAffected = hadAffected ? totalAffected : -1,
-                IsTrackedChange = tracked
+                IsTrackedChange = tracked,
+                DatabaseName = string.Join(", ", databases)
             };
         }
         catch (Exception ex)
@@ -159,7 +174,8 @@ public sealed class SqlExecutionService : ISqlExecutionService
                 Message = string.Join(Environment.NewLine, messages),
                 Tables = tables,
                 RowsAffected = hadAffected ? totalAffected : -1,
-                IsTrackedChange = tracked
+                IsTrackedChange = tracked,
+                DatabaseName = string.Join(", ", databases)
             };
         }
     }
@@ -171,6 +187,28 @@ public sealed class SqlExecutionService : ISqlExecutionService
             .Select(batch => batch.Trim())
             .Where(batch => batch.Length > 0)
             .ToList();
+    }
+
+    private static async Task<string?> GetDatabaseNameAsync(SqlConnection connection, CancellationToken cancellationToken)
+    {
+        await using var command = connection.CreateCommand();
+        command.CommandText = "SELECT DB_NAME();";
+        return await command.ExecuteScalarAsync(cancellationToken) as string;
+    }
+
+    private static void RememberDatabase(List<string> databases, string? databaseName)
+    {
+        if (string.IsNullOrWhiteSpace(databaseName))
+        {
+            return;
+        }
+
+        if (databases.Any(name => string.Equals(name, databaseName, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        databases.Add(databaseName);
     }
 
     private static string FormatSqlError(SqlException exception)

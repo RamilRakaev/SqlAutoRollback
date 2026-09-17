@@ -259,9 +259,14 @@ public sealed partial class MainViewModel : ObservableObject
             if (result.Success && result.IsTrackedChange)
             {
                 var rollback = string.IsNullOrWhiteSpace(result.RollbackScript)
-                    ? RollbackScriptBuilder.BuildBestEffort(script)
-                    : result.RollbackScript;
-                await _history.AddAsync(ActiveConnection.ServerName, script, rollback, result.RowsAffected);
+                    ? RollbackScriptBuilder.BuildBestEffort(script, result.DatabaseName)
+                    : RollbackScriptBuilder.PrefixUse(result.RollbackScript, result.DatabaseName);
+                await _history.AddAsync(
+                    ActiveConnection.ServerName,
+                    script,
+                    rollback,
+                    result.DatabaseName,
+                    result.RowsAffected);
                 await ReloadHistoryAsync();
             }
         }
@@ -286,8 +291,8 @@ public sealed partial class MainViewModel : ObservableObject
         }
 
         var rollback = string.IsNullOrWhiteSpace(entry.RollbackScript)
-            ? RollbackScriptBuilder.BuildBestEffort(entry.Script)
-            : entry.RollbackScript;
+            ? RollbackScriptBuilder.BuildBestEffort(entry.Script, entry.DatabaseName)
+            : RollbackScriptBuilder.PrefixUse(entry.RollbackScript, entry.DatabaseName);
         var stamp = entry.ExecutedAt == default
             ? DateTime.Now.ToString("dd.MM.yyyy HH.mm.ss")
             : entry.ExecutedAt.ToString("dd.MM.yyyy HH.mm.ss");

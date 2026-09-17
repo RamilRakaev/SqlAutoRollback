@@ -8,6 +8,7 @@ public interface IHistoryService
         string serverName,
         string script,
         string rollbackScript,
+        string databaseName,
         int rowsAffected,
         CancellationToken cancellationToken = default);
 

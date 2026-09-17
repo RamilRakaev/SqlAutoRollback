@@ -13,6 +13,7 @@ public sealed class RollbackScriptBuilder
     public async Task<RollbackCapture?> SnapshotBatchAsync(
         SqlConnection connection,
         string batch,
+        string? databaseName,
         CancellationToken cancellationToken)
     {
         var changes = SqlChangeParser.Parse(batch);
@@ -21,13 +22,20 @@ public sealed class RollbackScriptBuilder
             return null;
         }
 
+        if (!string.IsNullOrWhiteSpace(databaseName))
+        {
+            await using var useCommand = connection.CreateCommand();
+            useCommand.CommandText = $"USE {ParsedChange.Quote(databaseName)};";
+            await useCommand.ExecuteNonQueryAsync(cancellationToken);
+        }
+
         var snapshots = new List<ChangeSnapshot>();
         foreach (var change in changes)
         {
             snapshots.Add(await SnapshotAsync(connection, change, cancellationToken));
         }
 
-        return new RollbackCapture(snapshots);
+        return new RollbackCapture(snapshots, databaseName);
     }
 
     public async Task<string?> ComposeAsync(
@@ -45,18 +53,25 @@ public sealed class RollbackScriptBuilder
             }
         }
 
-        return parts.Count == 0 ? null : string.Join(Environment.NewLine + Environment.NewLine, parts);
+        if (parts.Count == 0)
+        {
+            return null;
+        }
+
+        return PrefixUse(string.Join(Environment.NewLine + Environment.NewLine, parts), capture.DatabaseName);
     }
 
-    public static string BuildBestEffort(string script)
+    public static string BuildBestEffort(string script, string? databaseName = null)
     {
         var changes = SqlChangeParser.Parse(script);
         if (changes.Count == 0)
         {
-            return """
+            return PrefixUse(
+                """
                 -- Automatic rollback is not available for this script.
                 -- Original:
-                """ + Environment.NewLine + script.Trim();
+                """ + Environment.NewLine + script.Trim(),
+                databaseName ?? SqlChangeParser.LastUseDatabaseName(script));
         }
 
         var parts = new List<string>();
@@ -65,7 +80,26 @@ public sealed class RollbackScriptBuilder
             parts.Add(BestEffortFor(change));
         }
 
-        return string.Join(Environment.NewLine + Environment.NewLine, parts);
+        return PrefixUse(
+            string.Join(Environment.NewLine + Environment.NewLine, parts),
+            databaseName ?? SqlChangeParser.LastUseDatabaseName(script));
+    }
+
+    public static string PrefixUse(string script, string? databaseName)
+    {
+        if (string.IsNullOrWhiteSpace(databaseName) || string.IsNullOrWhiteSpace(script))
+        {
+            return script;
+        }
+
+        var trimmed = script.TrimStart();
+        if (trimmed.StartsWith("USE ", StringComparison.OrdinalIgnoreCase)
+            || trimmed.StartsWith("USE[", StringComparison.OrdinalIgnoreCase))
+        {
+            return script;
+        }
+
+        return $"USE {ParsedChange.Quote(databaseName)};{Environment.NewLine}{Environment.NewLine}{script.Trim()}";
     }
 
     private static async Task<ChangeSnapshot> SnapshotAsync(
@@ -462,12 +496,15 @@ public sealed class RollbackScriptBuilder
 
     public sealed class RollbackCapture
     {
-        internal RollbackCapture(IReadOnlyList<ChangeSnapshot> snapshots)
+        internal RollbackCapture(IReadOnlyList<ChangeSnapshot> snapshots, string? databaseName)
         {
             Snapshots = snapshots;
+            DatabaseName = databaseName;
         }
 
         internal IReadOnlyList<ChangeSnapshot> Snapshots { get; }
+
+        internal string? DatabaseName { get; }
     }
 
     internal sealed class ChangeSnapshot

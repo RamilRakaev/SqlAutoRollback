@@ -1,4 +1,5 @@
 using System.IO;
+using System.Linq;
 using System.Text;
 using Microsoft.SqlServer.TransactSql.ScriptDom;
 using SqlAutoRollback.Models;
@@ -53,6 +54,78 @@ public static class SqlChangeParser
         }
 
         return (changes, true);
+    }
+
+    public static IReadOnlyList<string> ExtractUseDatabaseNames(string sql)
+    {
+        var names = new List<string>();
+        foreach (var name in EnumerateUseDatabaseNames(sql))
+        {
+            if (names.All(existing => !string.Equals(existing, name, StringComparison.OrdinalIgnoreCase)))
+            {
+                names.Add(name);
+            }
+        }
+
+        return names;
+    }
+
+    public static string? LastUseDatabaseName(string sql)
+    {
+        string? last = null;
+        foreach (var name in EnumerateUseDatabaseNames(sql))
+        {
+            last = name;
+        }
+
+        return last;
+    }
+
+    private static IEnumerable<string> EnumerateUseDatabaseNames(string sql)
+    {
+        if (string.IsNullOrWhiteSpace(sql))
+        {
+            yield break;
+        }
+
+        var parser = new TSql160Parser(false);
+        using var reader = new StringReader(sql);
+        var fragment = parser.Parse(reader, out _);
+        var found = false;
+        if (fragment is TSqlScript script)
+        {
+            foreach (var batch in script.Batches)
+            {
+                foreach (var statement in batch.Statements)
+                {
+                    if (statement is not UseStatement use
+                        || string.IsNullOrWhiteSpace(use.DatabaseName?.Value))
+                    {
+                        continue;
+                    }
+
+                    found = true;
+                    yield return use.DatabaseName.Value;
+                }
+            }
+        }
+
+        if (found)
+        {
+            yield break;
+        }
+
+        foreach (System.Text.RegularExpressions.Match match in System.Text.RegularExpressions.Regex.Matches(
+                     sql,
+                     @"\bUSE\s+(?:\[(?<name>[^\]]+)\]|(?<name>[A-Za-z0-9_]+))",
+                     System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+        {
+            var name = match.Groups["name"].Value;
+            if (name.Length > 0)
+            {
+                yield return name;
+            }
+        }
     }
 
     private static ParsedChange? Map(TSqlStatement statement)
