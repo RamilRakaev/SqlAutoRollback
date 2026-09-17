@@ -7,6 +7,7 @@ public sealed class ScriptHistoryEntry
     public string Script { get; init; } = string.Empty;
     public DateTime ExecutedAt { get; init; }
     public int RowsAffected { get; init; }
-    public string ExecutedAtDisplay => ExecutedAt.ToString("dd.MM.yyyy HH:mm:ss");
+    public string ExecutedAtDisplay =>
+        ExecutedAt == default ? string.Empty : ExecutedAt.ToString("dd.MM.yyyy HH:mm:ss");
     public string RowsAffectedDisplay => RowsAffected < 0 ? "—" : $"{RowsAffected} row(s) affected";
 }

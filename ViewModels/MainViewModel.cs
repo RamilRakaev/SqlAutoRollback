@@ -109,7 +109,15 @@ public sealed partial class MainViewModel : ObservableObject
             existing.ConnectionString = connectionString;
             existing.UserName = result.Credentials.UserName;
             existing.DisplayName = displayName;
-            ActiveConnection = existing;
+            if (ReferenceEquals(ActiveConnection, existing))
+            {
+                _ = ReloadHistoryAsync();
+            }
+            else
+            {
+                ActiveConnection = existing;
+            }
+
             return;
         }
 
@@ -136,6 +144,14 @@ public sealed partial class MainViewModel : ObservableObject
 
         try
         {
+            var existingDocument = Documents.FirstOrDefault(document =>
+                PathsEqual(document.FilePath, path));
+            if (existingDocument is not null)
+            {
+                ActiveDocument = existingDocument;
+                return;
+            }
+
             var text = _files.Read(path);
             var document = new QueryDocumentViewModel
             {
@@ -293,17 +309,44 @@ public sealed partial class MainViewModel : ObservableObject
         }
     }
 
+    private static bool PathsEqual(string? left, string? right)
+    {
+        if (string.IsNullOrWhiteSpace(left) || string.IsNullOrWhiteSpace(right))
+        {
+            return false;
+        }
+
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(left),
+                Path.GetFullPath(right),
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception)
+        {
+            return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
     private async Task ReloadHistoryAsync()
     {
+        var connection = ActiveConnection;
         HistoryEntries.Clear();
-        if (ActiveConnection is null)
+        if (connection is null)
         {
             return;
         }
 
         try
         {
-            var entries = await _history.GetAsync(ActiveConnection.ServerName);
+            var entries = await _history.GetAsync(connection.ServerName);
+            if (!ReferenceEquals(ActiveConnection, connection))
+            {
+                return;
+            }
+
+            HistoryEntries.Clear();
             foreach (var entry in entries)
             {
                 HistoryEntries.Add(entry);
@@ -311,6 +354,11 @@ public sealed partial class MainViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            if (!ReferenceEquals(ActiveConnection, connection))
+            {
+                return;
+            }
+
             ResultMessage = string.IsNullOrWhiteSpace(ResultMessage)
                 ? ex.Message
                 : ResultMessage;

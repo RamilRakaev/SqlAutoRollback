@@ -1,5 +1,7 @@
 using System.Globalization;
 using System.IO;
+using System.Linq;
+using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 using SqlAutoRollback.Models;
 
@@ -46,6 +48,12 @@ public sealed class HistoryService : IHistoryService
     public async Task<IReadOnlyList<ScriptHistoryEntry>> GetAsync(string serverName, CancellationToken cancellationToken = default)
     {
         AppPaths.EnsureCreated();
+
+        var fileEntries = await TryReadHistoryFileAsync(serverName, cancellationToken);
+        if (fileEntries.Count > 0)
+        {
+            return fileEntries;
+        }
 
         await _gate.WaitAsync(cancellationToken);
         try
@@ -119,13 +127,88 @@ public sealed class HistoryService : IHistoryService
         DateTime executedAt,
         CancellationToken cancellationToken)
     {
-        var fileName = AppPaths.SanitizeFileName(serverName) + ".sql";
-        var path = Path.Combine(AppPaths.History, fileName);
+        var path = AppPaths.GetHistoryFilePath(serverName);
         var block =
             $"-- {executedAt:dd.MM.yyyy HH:mm:ss}{Environment.NewLine}" +
             $"{script.Trim()}{Environment.NewLine}{Environment.NewLine}" +
             $"GO{Environment.NewLine}{Environment.NewLine}";
 
         await File.AppendAllTextAsync(path, block, cancellationToken);
+    }
+
+    private static async Task<IReadOnlyList<ScriptHistoryEntry>> TryReadHistoryFileAsync(
+        string serverName,
+        CancellationToken cancellationToken)
+    {
+        var path = AppPaths.GetHistoryFilePath(serverName);
+        if (!File.Exists(path))
+        {
+            return [];
+        }
+
+        var content = await File.ReadAllTextAsync(path, cancellationToken);
+        return ParseHistoryFile(serverName, content);
+    }
+
+    private static readonly Regex GoSplitter = new(
+        @"^\s*GO\s*$",
+        RegexOptions.Multiline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    private static IReadOnlyList<ScriptHistoryEntry> ParseHistoryFile(string serverName, string content)
+    {
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            return [];
+        }
+
+        var entries = new List<ScriptHistoryEntry>();
+        var blocks = GoSplitter.Split(content);
+        long id = 0;
+
+        foreach (var rawBlock in blocks)
+        {
+            var block = rawBlock.Trim();
+            if (block.Length == 0)
+            {
+                continue;
+            }
+
+            var executedAt = default(DateTime);
+            var script = block;
+            var lineBreak = block.IndexOfAny(['\r', '\n']);
+            var firstLine = lineBreak >= 0 ? block[..lineBreak] : block;
+
+            if (firstLine.StartsWith("-- ", StringComparison.Ordinal))
+            {
+                var stamp = firstLine[3..].Trim();
+                if (DateTime.TryParseExact(
+                        stamp,
+                        "dd.MM.yyyy HH:mm:ss",
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.None,
+                        out var parsed))
+                {
+                    executedAt = parsed;
+                    script = lineBreak >= 0 ? block[(lineBreak + 1)..].Trim() : string.Empty;
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(script))
+            {
+                continue;
+            }
+
+            entries.Add(new ScriptHistoryEntry
+            {
+                Id = ++id,
+                ServerName = serverName,
+                Script = script,
+                ExecutedAt = executedAt,
+                RowsAffected = -1
+            });
+        }
+
+        entries.Reverse();
+        return entries.Count <= 200 ? entries : entries.Take(200).ToList();
     }
 }
