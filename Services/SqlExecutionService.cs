@@ -12,6 +12,8 @@ public sealed class SqlExecutionService : ISqlExecutionService
         @"^\s*GO\s*(?:--.*)?$",
         RegexOptions.Multiline | RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
+    private readonly RollbackScriptBuilder _rollback = new();
+
     public async Task<ServerInfo> TestConnectionAsync(string connectionString, CancellationToken cancellationToken = default)
     {
         await using var connection = new SqlConnection(connectionString);
@@ -44,6 +46,8 @@ public sealed class SqlExecutionService : ISqlExecutionService
         var messages = new List<string>();
         var totalAffected = 0;
         var hadAffected = false;
+        var tracked = SqlChangeParser.ContainsTrackedChanges(script);
+        var rollbackParts = new List<string>();
 
         await using var connection = new SqlConnection(connectionString);
         connection.InfoMessage += (_, args) =>
@@ -61,6 +65,19 @@ public sealed class SqlExecutionService : ISqlExecutionService
             foreach (var batch in batches)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                RollbackScriptBuilder.RollbackCapture? capture = null;
+                if (tracked)
+                {
+                    try
+                    {
+                        capture = await _rollback.SnapshotBatchAsync(connection, batch, cancellationToken);
+                    }
+                    catch (Exception ex)
+                    {
+                        messages.Add("Rollback snapshot warning: " + ex.Message);
+                    }
+                }
+
                 await using var command = connection.CreateCommand();
                 command.CommandText = batch;
                 command.CommandTimeout = 60;
@@ -70,7 +87,7 @@ public sealed class SqlExecutionService : ISqlExecutionService
                 {
                     if (reader.FieldCount > 0)
                     {
-                        var table = LoadTable(reader);
+                        var table = DataTableLoader.Load(reader);
                         table.TableName = $"Result {tables.Count + 1}";
                         tables.Add(table);
                         messages.Add($"({table.Rows.Count} row{(table.Rows.Count == 1 ? "" : "s")} returned)");
@@ -84,6 +101,24 @@ public sealed class SqlExecutionService : ISqlExecutionService
                     hadAffected = true;
                     messages.Add($"{reader.RecordsAffected} row(s) affected.");
                 }
+
+                await reader.CloseAsync();
+
+                if (capture is not null)
+                {
+                    try
+                    {
+                        var part = await _rollback.ComposeAsync(connection, capture, cancellationToken);
+                        if (!string.IsNullOrWhiteSpace(part))
+                        {
+                            rollbackParts.Insert(0, part);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        messages.Add("Rollback compose warning: " + ex.Message);
+                    }
+                }
             }
 
             if (messages.Count == 0)
@@ -96,7 +131,11 @@ public sealed class SqlExecutionService : ISqlExecutionService
                 Success = true,
                 Message = string.Join(Environment.NewLine, messages),
                 Tables = tables,
-                RowsAffected = hadAffected ? totalAffected : -1
+                RowsAffected = hadAffected ? totalAffected : -1,
+                IsTrackedChange = tracked,
+                RollbackScript = rollbackParts.Count == 0
+                    ? null
+                    : string.Join(Environment.NewLine + Environment.NewLine, rollbackParts)
             };
         }
         catch (SqlException ex)
@@ -107,7 +146,8 @@ public sealed class SqlExecutionService : ISqlExecutionService
                 Success = false,
                 Message = string.Join(Environment.NewLine, messages),
                 Tables = tables,
-                RowsAffected = hadAffected ? totalAffected : -1
+                RowsAffected = hadAffected ? totalAffected : -1,
+                IsTrackedChange = tracked
             };
         }
         catch (Exception ex)
@@ -118,7 +158,8 @@ public sealed class SqlExecutionService : ISqlExecutionService
                 Success = false,
                 Message = string.Join(Environment.NewLine, messages),
                 Tables = tables,
-                RowsAffected = hadAffected ? totalAffected : -1
+                RowsAffected = hadAffected ? totalAffected : -1,
+                IsTrackedChange = tracked
             };
         }
     }
@@ -130,56 +171,6 @@ public sealed class SqlExecutionService : ISqlExecutionService
             .Select(batch => batch.Trim())
             .Where(batch => batch.Length > 0)
             .ToList();
-    }
-
-    private static DataTable LoadTable(SqlDataReader reader)
-    {
-        var table = new DataTable();
-        var usedNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        for (var i = 0; i < reader.FieldCount; i++)
-        {
-            var name = reader.GetName(i);
-            if (string.IsNullOrWhiteSpace(name))
-            {
-                name = $"Column{i + 1}";
-            }
-
-            var unique = name;
-            var suffix = 1;
-            while (!usedNames.Add(unique))
-            {
-                unique = $"{name}{suffix++}";
-            }
-
-            var type = reader.GetFieldType(i) ?? typeof(object);
-            if (type == typeof(byte[]))
-            {
-                type = typeof(string);
-            }
-
-            table.Columns.Add(unique, Nullable.GetUnderlyingType(type) ?? type);
-        }
-
-        while (reader.Read())
-        {
-            var values = new object[reader.FieldCount];
-            for (var i = 0; i < reader.FieldCount; i++)
-            {
-                if (reader.IsDBNull(i))
-                {
-                    values[i] = DBNull.Value;
-                    continue;
-                }
-
-                var value = reader.GetValue(i);
-                values[i] = value is byte[] bytes ? Convert.ToHexString(bytes) : value;
-            }
-
-            table.Rows.Add(values);
-        }
-
-        return table;
     }
 
     private static string FormatSqlError(SqlException exception)

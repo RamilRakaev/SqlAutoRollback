@@ -1,6 +1,7 @@
 ## Visual Studio / .NET
 bin/
 obj/
+_buildcheck/
 .vs/
 *.user
 *.suo

@@ -27,10 +27,14 @@
         <StackPanel Grid.Row="0" Margin="0,0,0,12"
                     IsEnabled="{Binding IsBusy, Converter={StaticResource InverseBool}}">
             <TextBlock Text="Server Name" Margin="0,0,0,4"/>
-            <TextBox Text="{Binding ServerName, UpdateSourceTrigger=PropertyChanged}"
-                     Height="24"
-                     Padding="4,2"
-                     VerticalContentAlignment="Center"/>
+            <ComboBox IsEditable="True"
+                      IsTextSearchEnabled="True"
+                      StaysOpenOnEdit="True"
+                      ItemsSource="{Binding KnownServers}"
+                      Text="{Binding ServerName, UpdateSourceTrigger=PropertyChanged}"
+                      MinHeight="24"
+                      Padding="4,2"
+                      VerticalContentAlignment="Center"/>
         </StackPanel>
 
         <StackPanel Grid.Row="1" Margin="0,0,0,12"

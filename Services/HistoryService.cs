@@ -11,10 +11,21 @@ public sealed class HistoryService : IHistoryService
 {
     private readonly SemaphoreSlim _gate = new(1, 1);
 
-    public async Task AddAsync(string serverName, string script, int rowsAffected, CancellationToken cancellationToken = default)
+    public async Task AddAsync(
+        string serverName,
+        string script,
+        string rollbackScript,
+        int rowsAffected,
+        CancellationToken cancellationToken = default)
     {
+        if (!SqlChangeParser.ContainsTrackedChanges(script))
+        {
+            return;
+        }
+
         AppPaths.EnsureCreated();
         var executedAt = DateTime.Now;
+        rollbackScript ??= string.Empty;
 
         await _gate.WaitAsync(cancellationToken);
         try
@@ -27,11 +38,12 @@ public sealed class HistoryService : IHistoryService
             {
                 command.CommandText =
                     """
-                    INSERT INTO ScriptHistory (ServerName, Script, ExecutedAt, RowsAffected)
-                    VALUES ($server, $script, $executedAt, $rows);
+                    INSERT INTO ScriptHistory (ServerName, Script, RollbackScript, ExecutedAt, RowsAffected)
+                    VALUES ($server, $script, $rollback, $executedAt, $rows);
                     """;
                 command.Parameters.AddWithValue("$server", serverName);
                 command.Parameters.AddWithValue("$script", script);
+                command.Parameters.AddWithValue("$rollback", rollbackScript);
                 command.Parameters.AddWithValue("$executedAt", executedAt.ToString("o", CultureInfo.InvariantCulture));
                 command.Parameters.AddWithValue("$rows", rowsAffected);
                 await command.ExecuteNonQueryAsync(cancellationToken);
@@ -42,7 +54,7 @@ public sealed class HistoryService : IHistoryService
             _gate.Release();
         }
 
-        await AppendHistoryFileAsync(serverName, script, executedAt, cancellationToken);
+        await AppendHistoryFileAsync(serverName, script, rollbackScript, executedAt, cancellationToken);
     }
 
     public async Task<IReadOnlyList<ScriptHistoryEntry>> GetAsync(string serverName, CancellationToken cancellationToken = default)
@@ -65,7 +77,7 @@ public sealed class HistoryService : IHistoryService
             await using var command = connection.CreateCommand();
             command.CommandText =
                 """
-                SELECT Id, ServerName, Script, ExecutedAt, RowsAffected
+                SELECT Id, ServerName, Script, IFNULL(RollbackScript, ''), ExecutedAt, RowsAffected
                 FROM ScriptHistory
                 WHERE ServerName = $server
                 ORDER BY Id DESC
@@ -77,13 +89,20 @@ public sealed class HistoryService : IHistoryService
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
+                var script = reader.GetString(2);
+                if (!SqlChangeParser.ContainsTrackedChanges(script))
+                {
+                    continue;
+                }
+
                 entries.Add(new ScriptHistoryEntry
                 {
                     Id = reader.GetInt64(0),
                     ServerName = reader.GetString(1),
-                    Script = reader.GetString(2),
-                    ExecutedAt = DateTime.Parse(reader.GetString(3), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
-                    RowsAffected = reader.GetInt32(4)
+                    Script = script,
+                    RollbackScript = reader.GetString(3),
+                    ExecutedAt = DateTime.Parse(reader.GetString(4), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind),
+                    RowsAffected = reader.GetInt32(5)
                 });
             }
 
@@ -113,24 +132,54 @@ public sealed class HistoryService : IHistoryService
                 Id INTEGER PRIMARY KEY AUTOINCREMENT,
                 ServerName TEXT NOT NULL,
                 Script TEXT NOT NULL,
+                RollbackScript TEXT NOT NULL DEFAULT '',
                 ExecutedAt TEXT NOT NULL,
                 RowsAffected INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS IX_ScriptHistory_ServerName ON ScriptHistory(ServerName);
             """;
         await command.ExecuteNonQueryAsync(cancellationToken);
+
+        await using var info = connection.CreateCommand();
+        info.CommandText = "PRAGMA table_info(ScriptHistory);";
+        var hasRollback = false;
+        await using (var reader = await info.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                if (string.Equals(reader.GetString(1), "RollbackScript", StringComparison.OrdinalIgnoreCase))
+                {
+                    hasRollback = true;
+                    break;
+                }
+            }
+        }
+
+        if (!hasRollback)
+        {
+            await using var alter = connection.CreateCommand();
+            alter.CommandText = "ALTER TABLE ScriptHistory ADD COLUMN RollbackScript TEXT NOT NULL DEFAULT '';";
+            await alter.ExecuteNonQueryAsync(cancellationToken);
+        }
     }
 
     private static async Task AppendHistoryFileAsync(
         string serverName,
         string script,
+        string rollbackScript,
         DateTime executedAt,
         CancellationToken cancellationToken)
     {
         var path = AppPaths.GetHistoryFilePath(serverName);
+        var rollback = string.IsNullOrWhiteSpace(rollbackScript)
+            ? RollbackScriptBuilder.BuildBestEffort(script)
+            : rollbackScript.Trim();
         var block =
             $"-- {executedAt:dd.MM.yyyy HH:mm:ss}{Environment.NewLine}" +
+            $"-- Original:{Environment.NewLine}" +
             $"{script.Trim()}{Environment.NewLine}{Environment.NewLine}" +
+            $"-- Rollback:{Environment.NewLine}" +
+            $"{rollback}{Environment.NewLine}{Environment.NewLine}" +
             $"GO{Environment.NewLine}{Environment.NewLine}";
 
         await File.AppendAllTextAsync(path, block, cancellationToken);
@@ -193,9 +242,26 @@ public sealed class HistoryService : IHistoryService
                 }
             }
 
-            if (string.IsNullOrWhiteSpace(script))
+            var rollback = string.Empty;
+            const string originalMarker = "-- Original:";
+            const string rollbackMarker = "-- Rollback:";
+            var originalIndex = script.IndexOf(originalMarker, StringComparison.OrdinalIgnoreCase);
+            var rollbackIndex = script.IndexOf(rollbackMarker, StringComparison.OrdinalIgnoreCase);
+            if (originalIndex >= 0 && rollbackIndex > originalIndex)
+            {
+                var original = script[(originalIndex + originalMarker.Length)..rollbackIndex].Trim();
+                rollback = script[(rollbackIndex + rollbackMarker.Length)..].Trim();
+                script = original;
+            }
+
+            if (string.IsNullOrWhiteSpace(script) || !SqlChangeParser.ContainsTrackedChanges(script))
             {
                 continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(rollback))
+            {
+                rollback = RollbackScriptBuilder.BuildBestEffort(script);
             }
 
             entries.Add(new ScriptHistoryEntry
@@ -203,6 +269,7 @@ public sealed class HistoryService : IHistoryService
                 Id = ++id,
                 ServerName = serverName,
                 Script = script,
+                RollbackScript = rollback,
                 ExecutedAt = executedAt,
                 RowsAffected = -1
             });

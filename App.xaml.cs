@@ -22,8 +22,9 @@ public partial class App : Application
         var files = new ScriptFileService();
         var history = new HistoryService();
         var credentials = new CredentialStore();
+        var servers = new ServerHistoryStore();
         var dialogs = new DialogService(sql);
-        var viewModel = new MainViewModel(sql, files, history, dialogs, credentials);
+        var viewModel = new MainViewModel(sql, files, history, dialogs, credentials, servers);
 
         var window = new MainWindow
         {

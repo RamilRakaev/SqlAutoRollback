@@ -4,7 +4,7 @@ namespace SqlAutoRollback.Services;
 
 public interface IDialogService
 {
-    ConnectDialogResult? ShowConnectDialog(ConnectionCredentials? lastUsed);
+    ConnectDialogResult? ShowConnectDialog(ConnectionCredentials? lastUsed, IReadOnlyList<string> knownServers);
 
     string? ShowOpenSqlFileDialog();
 

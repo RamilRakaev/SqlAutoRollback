@@ -15,6 +15,7 @@ public sealed partial class MainViewModel : ObservableObject
     private readonly IHistoryService _history;
     private readonly IDialogService _dialogs;
     private readonly ICredentialStore _credentials;
+    private readonly IServerHistoryStore _servers;
     private int _queryCounter;
 
     public MainViewModel(
@@ -22,13 +23,15 @@ public sealed partial class MainViewModel : ObservableObject
         IScriptFileService files,
         IHistoryService history,
         IDialogService dialogs,
-        ICredentialStore credentials)
+        ICredentialStore credentials,
+        IServerHistoryStore servers)
     {
         _sql = sql;
         _files = files;
         _history = history;
         _dialogs = dialogs;
         _credentials = credentials;
+        _servers = servers;
 
         Connections.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasConnections));
         ResultTables.CollectionChanged += (_, _) => OnPropertyChanged(nameof(HasResultTables));
@@ -89,13 +92,22 @@ public sealed partial class MainViewModel : ObservableObject
     private void ShowConnect()
     {
         var lastUsed = _credentials.Load();
-        var result = _dialogs.ShowConnectDialog(lastUsed);
+        var knownServers = _servers.GetAll().ToList();
+        if (lastUsed is not null
+            && !string.IsNullOrWhiteSpace(lastUsed.ServerName)
+            && knownServers.All(name => !string.Equals(name, lastUsed.ServerName, StringComparison.OrdinalIgnoreCase)))
+        {
+            knownServers.Insert(0, lastUsed.ServerName);
+        }
+
+        var result = _dialogs.ShowConnectDialog(lastUsed, knownServers);
         if (result is null)
         {
             return;
         }
 
         _credentials.Save(result.Credentials);
+        _servers.Remember(result.Credentials.ServerName);
         var connectionString = SqlConnectionFactory.Build(result.Credentials);
         var displayName = string.IsNullOrWhiteSpace(result.ProductMajorVersion)
             ? result.Credentials.ServerName
@@ -244,9 +256,12 @@ public sealed partial class MainViewModel : ObservableObject
             HasExecutionError = !result.Success;
             ResultMessage = result.Message;
 
-            if (result.Success)
+            if (result.Success && result.IsTrackedChange)
             {
-                await _history.AddAsync(ActiveConnection.ServerName, script, result.RowsAffected);
+                var rollback = string.IsNullOrWhiteSpace(result.RollbackScript)
+                    ? RollbackScriptBuilder.BuildBestEffort(script)
+                    : result.RollbackScript;
+                await _history.AddAsync(ActiveConnection.ServerName, script, rollback, result.RowsAffected);
                 await ReloadHistoryAsync();
             }
         }
@@ -260,6 +275,31 @@ public sealed partial class MainViewModel : ObservableObject
             IsExecuting = false;
             ExecuteCommand.NotifyCanExecuteChanged();
         }
+    }
+
+    [RelayCommand]
+    private void OpenRollback(ScriptHistoryEntry? entry)
+    {
+        if (entry is null)
+        {
+            return;
+        }
+
+        var rollback = string.IsNullOrWhiteSpace(entry.RollbackScript)
+            ? RollbackScriptBuilder.BuildBestEffort(entry.Script)
+            : entry.RollbackScript;
+        var stamp = entry.ExecutedAt == default
+            ? DateTime.Now.ToString("dd.MM.yyyy HH.mm.ss")
+            : entry.ExecutedAt.ToString("dd.MM.yyyy HH.mm.ss");
+        var document = new QueryDocumentViewModel
+        {
+            Title = $"Rollback_{stamp}.sql"
+        };
+        document.SetText(
+            "-- Auto-generated rollback. Review before executing." + Environment.NewLine +
+            rollback.Trim() + Environment.NewLine);
+        Documents.Add(document);
+        ActiveDocument = document;
     }
 
     [RelayCommand]

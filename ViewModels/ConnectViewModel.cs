@@ -34,9 +34,10 @@ public sealed partial class ConnectViewModel : ObservableObject
     [NotifyPropertyChangedFor(nameof(AreCredentialFieldsEnabled))]
     private bool isBusy;
 
-    public ConnectViewModel(ISqlExecutionService sql, ConnectionCredentials? lastUsed)
+    public ConnectViewModel(ISqlExecutionService sql, ConnectionCredentials? lastUsed, IReadOnlyList<string> knownServers)
     {
         _sql = sql;
+        KnownServers = knownServers;
         AuthenticationModes =
         [
             WindowsAuthentication,
@@ -60,6 +61,8 @@ public sealed partial class ConnectViewModel : ObservableObject
             ? string.Empty
             : lastUsed.Password;
     }
+
+    public IReadOnlyList<string> KnownServers { get; }
 
     public IReadOnlyList<string> AuthenticationModes { get; }
 

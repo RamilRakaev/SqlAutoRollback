@@ -16,6 +16,8 @@ public static class AppPaths
 
     public static string Credentials { get; } = Path.Combine(Root, "credentials.dat");
 
+    public static string KnownServers { get; } = Path.Combine(Root, "servers.json");
+
     public static string GetHistoryFilePath(string serverName)
     {
         return Path.Combine(History, SanitizeFileName(serverName) + ".sql");

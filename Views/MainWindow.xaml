@@ -329,7 +329,7 @@
 
                         <TabItem Header="History">
                             <Grid>
-                                <TextBlock Text="Successfully executed scripts will appear here."
+                                <TextBlock Text="INSERT, UPDATE, DELETE and other data-changing scripts will appear here."
                                            Foreground="#888"
                                            HorizontalAlignment="Center"
                                            VerticalAlignment="Center"
@@ -353,12 +353,19 @@
                                                     Padding="10,8">
                                                 <DockPanel>
                                                     <DockPanel DockPanel.Dock="Top" Margin="0,0,0,6">
+                                                        <Button DockPanel.Dock="Right"
+                                                                Content="Rollback"
+                                                                Margin="8,0,0,0"
+                                                                Padding="8,2"
+                                                                FontSize="11"
+                                                                Cursor="Hand"
+                                                                ToolTip="Open a new query with a rollback script"
+                                                                Command="{Binding DataContext.OpenRollbackCommand, RelativeSource={RelativeSource AncestorType=Window}}"
+                                                                CommandParameter="{Binding}"/>
                                                         <TextBlock Text="{Binding ExecutedAtDisplay}"
                                                                    FontWeight="SemiBold"
-                                                                   Foreground="#333"/>
-                                                        <TextBlock Text="{Binding RowsAffectedDisplay}"
-                                                                   Foreground="#666"
-                                                                   HorizontalAlignment="Right"/>
+                                                                   Foreground="#333"
+                                                                   VerticalAlignment="Center"/>
                                                     </DockPanel>
                                                     <TextBox Text="{Binding Script, Mode=OneWay}"
                                                              IsReadOnly="True"

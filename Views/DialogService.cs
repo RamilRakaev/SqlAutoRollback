@@ -15,9 +15,9 @@ public sealed class DialogService : IDialogService
         _sql = sql;
     }
 
-    public ConnectDialogResult? ShowConnectDialog(ConnectionCredentials? lastUsed)
+    public ConnectDialogResult? ShowConnectDialog(ConnectionCredentials? lastUsed, IReadOnlyList<string> knownServers)
     {
-        var viewModel = new ConnectViewModel(_sql, lastUsed);
+        var viewModel = new ConnectViewModel(_sql, lastUsed, knownServers);
         var window = new ConnectWindow
         {
             Owner = Application.Current.MainWindow,
